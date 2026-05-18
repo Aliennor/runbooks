@@ -75,6 +75,13 @@ ALL_IDS="litellm_pg langfuse_pg n8n_pg ragflow_mysql langfuse_clickhouse langfus
 ARTIFACTS="${ARTIFACTS:-all}"
 SKIP="${SKIP:-}"
 
+# Image used by vol_tar() to run `tar` against --volumes-from. Override with
+# TAR_IMAGE=alpine:3.20 (etc.) on hosts that can't pull alpine:latest.
+TAR_IMAGE="${TAR_IMAGE:-alpine}"
+
+# Heartbeat interval (seconds) for in-progress vol_tar runs.
+HEARTBEAT="${HEARTBEAT:-15}"
+
 if [[ "$ARTIFACTS" == "list" ]]; then
   echo "Available artifact IDs:"
   for id in $ALL_IDS; do echo "  $id"; done
@@ -243,11 +250,25 @@ vol_tar() {
   fi
   local was_running
   was_running="$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null || echo false)"
-  log "[$label] tar $container:$mount -> $out (was_running=$was_running)"
+  log "[$label] tar $container:$mount -> $out (was_running=$was_running, image=$TAR_IMAGE)"
   if [[ "$was_running" == "true" ]]; then
     docker stop "$container" >>"$LOG" 2>&1 || { record FAIL "$out" "docker stop failed"; return; }
   fi
-  if docker run --rm --volumes-from "$container" -v "${OUT}:/out" alpine tar czf "/out/${out}" -C "$mount" . >>"$LOG" 2>&1; then
+  ( docker run --rm --volumes-from "$container" -v "${OUT}:/out" "$TAR_IMAGE" tar czf "/out/${out}" -C "$mount" . >>"$LOG" 2>&1 ) &
+  local tar_pid=$!
+  local target="${OUT}/${out}"
+  local elapsed=0
+  while kill -0 "$tar_pid" 2>/dev/null; do
+    sleep "$HEARTBEAT"
+    elapsed=$((elapsed + HEARTBEAT))
+    if [[ -f "$target" ]]; then
+      local sz; sz=$(du -h "$target" 2>/dev/null | awk '{print $1}')
+      log "[$label] still tarring (${elapsed}s elapsed, size=${sz:-?})"
+    else
+      log "[$label] still tarring (${elapsed}s elapsed, no output file yet)"
+    fi
+  done
+  if wait "$tar_pid"; then
     record OK "$out"
   else
     record FAIL "$out" "tar via volumes-from failed"

@@ -16,7 +16,8 @@ Every artifact is its own separate file (no final bundle), and you can pick exac
 
 - `docker stop` / `docker start` only — **never `compose down/up`** (RagFlow ES `_state/` desync).
 - Each artifact runs in its own guarded function: missing containers → SKIP, errors → FAIL, run never aborts.
-- Volume tars use `--volumes-from` + alpine, so they work regardless of how the volume is project-prefixed.
+- Volume tars use `--volumes-from` + a tar-capable image (default `alpine`, overridable via `TAR_IMAGE`), so they work regardless of how the volume is project-prefixed.
+- Volume tars emit heartbeat lines every `HEARTBEAT` seconds (default 15) while running, so long ClickHouse / ES tars are visibly progressing.
 - Manifest is generated last with sha256 + size + container→image table + per-artifact status (OK / SKIP / FAIL).
 
 ## Artifact Set Per Host
@@ -132,6 +133,16 @@ ARTIFACTS=openwebui_data,secrets bash /tmp/k8s_full_export.sh banka_dev
 Output lands in `/tmp/k8s_export_<env>_<stamp>/`. The final summary
 (printed at end of run) contains the full manifest, marking each
 unselected/unfound artifact accordingly.
+
+### Hosts that can't pull `alpine:latest`
+
+If `docker run --rm … alpine tar …` fails with `Unable to find image 'alpine:latest' locally` and the pull errors out, override the tar image to whatever the host already has:
+
+```bash
+TAR_IMAGE=alpine:3.20 ENV=banka_dev bash /tmp/k8s_full_export.sh
+```
+
+Any image with `tar` works (`busybox`, `debian:bookworm-slim`, etc.). The chosen image is printed in the heartbeat log lines.
 
 ---
 
