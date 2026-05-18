@@ -75,9 +75,14 @@ ALL_IDS="litellm_pg langfuse_pg n8n_pg ragflow_mysql langfuse_clickhouse langfus
 ARTIFACTS="${ARTIFACTS:-all}"
 SKIP="${SKIP:-}"
 
-# Image used by vol_tar() to run `tar` against --volumes-from. Override with
-# TAR_IMAGE=alpine:3.20 (etc.) on hosts that can't pull alpine:latest.
-TAR_IMAGE="${TAR_IMAGE:-alpine}"
+# Image used by vol_tar() to run `tar` against --volumes-from.
+#   - If TAR_IMAGE is set explicitly, that image is used (must exist locally,
+#     no auto-pull). Useful to force a specific tag.
+#   - Otherwise the script scans TAR_IMAGE_CANDIDATES and picks the first one
+#     that's already present locally (via `docker image inspect`).
+#   - If nothing matches, volume tars SKIP this run; SQL dumps still proceed.
+TAR_IMAGE="${TAR_IMAGE:-}"
+TAR_IMAGE_CANDIDATES="${TAR_IMAGE_CANDIDATES:-alpine alpine:3.20 alpine:3.19 alpine:3.18 busybox nginx:alpine}"
 
 # Heartbeat interval (seconds) for in-progress vol_tar runs.
 HEARTBEAT="${HEARTBEAT:-15}"
@@ -161,6 +166,37 @@ record() {
 }
 
 # ---------------------------------------------------------------------------
+# Resolve tar image for vol_tar(). Explicit TAR_IMAGE wins (must exist locally,
+# no auto-pull). Otherwise pick the first candidate present locally. Failure
+# is non-fatal — vol_tar() will SKIP volume artifacts while SQL dumps proceed.
+# ---------------------------------------------------------------------------
+resolve_tar_image() {
+  if [[ -n "$TAR_IMAGE" ]]; then
+    if docker image inspect "$TAR_IMAGE" >/dev/null 2>&1; then
+      log "tar image: $TAR_IMAGE (operator-set, present locally)"
+      return 0
+    fi
+    log "ERROR: TAR_IMAGE=$TAR_IMAGE not present locally and auto-pull is disabled"
+    log "       fix: docker pull $TAR_IMAGE   (or unset TAR_IMAGE to use auto-detect)"
+    TAR_IMAGE=""
+    return 1
+  fi
+  local cand
+  for cand in $TAR_IMAGE_CANDIDATES; do
+    if docker image inspect "$cand" >/dev/null 2>&1; then
+      TAR_IMAGE="$cand"
+      log "tar image: $TAR_IMAGE (auto-selected, first local match from candidates)"
+      return 0
+    fi
+  done
+  log "ERROR: none of [$TAR_IMAGE_CANDIDATES] are present locally"
+  log "       fix: docker pull alpine   (or pull any image with tar and set TAR_IMAGE)"
+  log "       volume tars will SKIP this run; SQL dumps will still proceed"
+  return 1
+}
+resolve_tar_image || true
+
+# ---------------------------------------------------------------------------
 # Container discovery
 # ---------------------------------------------------------------------------
 find_one() {
@@ -238,6 +274,11 @@ mysql_dump_ragflow() {
 vol_tar() {
   # vol_tar <container> <mount_path_inside> <out_filename> <label>
   local container="$1" mount="$2" out="$3" label="$4"
+  if [[ -z "$TAR_IMAGE" ]]; then
+    log "[$label] SKIP — no tar image resolved (see startup log)"
+    record SKIP "$out" "no tar image available locally"
+    return
+  fi
   if [[ -z "$container" ]]; then
     log "[$label] SKIP — container not found"
     record SKIP "$out" "container not found"

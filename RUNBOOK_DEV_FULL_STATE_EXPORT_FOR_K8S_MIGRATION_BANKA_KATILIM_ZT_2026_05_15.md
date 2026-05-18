@@ -16,8 +16,9 @@ Every artifact is its own separate file (no final bundle), and you can pick exac
 
 - `docker stop` / `docker start` only — **never `compose down/up`** (RagFlow ES `_state/` desync).
 - Each artifact runs in its own guarded function: missing containers → SKIP, errors → FAIL, run never aborts.
-- Volume tars use `--volumes-from` + a tar-capable image (default `alpine`, overridable via `TAR_IMAGE`), so they work regardless of how the volume is project-prefixed.
+- Volume tars use `--volumes-from` + a tar-capable image. The script auto-detects from `TAR_IMAGE_CANDIDATES` (default: `alpine alpine:3.20 alpine:3.19 alpine:3.18 busybox nginx:alpine`) — first local match wins, no network pull. Override with `TAR_IMAGE=<image>` to force a specific tag.
 - Volume tars emit heartbeat lines every `HEARTBEAT` seconds (default 15) while running, so long ClickHouse / ES tars are visibly progressing.
+- If no candidate image is present locally, volume tars SKIP cleanly and the manifest records the reason; SQL dumps still proceed.
 - Manifest is generated last with sha256 + size + container→image table + per-artifact status (OK / SKIP / FAIL).
 
 ## Artifact Set Per Host
@@ -134,15 +135,28 @@ Output lands in `/tmp/k8s_export_<env>_<stamp>/`. The final summary
 (printed at end of run) contains the full manifest, marking each
 unselected/unfound artifact accordingly.
 
-### Hosts that can't pull `alpine:latest`
+### Tar image selection (hosts that can't pull `alpine:latest`)
 
-If `docker run --rm … alpine tar …` fails with `Unable to find image 'alpine:latest' locally` and the pull errors out, override the tar image to whatever the host already has:
+By default the script scans for one of [`alpine`, `alpine:3.20`, `alpine:3.19`, `alpine:3.18`, `busybox`, `nginx:alpine`] and uses the first one already present locally — **no network pull**. The chosen image is logged at startup (`tar image: <name> (auto-selected, ...)`) and again on every heartbeat line.
+
+To force a specific image (must exist locally; no auto-pull):
 
 ```bash
 TAR_IMAGE=alpine:3.20 ENV=banka_dev bash /tmp/k8s_full_export.sh
 ```
 
-Any image with `tar` works (`busybox`, `debian:bookworm-slim`, etc.). The chosen image is printed in the heartbeat log lines.
+To extend the candidate list (any image with `tar` works — `busybox`, `debian:bookworm-slim`, `nginx:alpine`, etc.):
+
+```bash
+TAR_IMAGE_CANDIDATES="alpine alpine:3.20 nginx:alpine debian:bookworm-slim" ENV=banka_dev bash /tmp/k8s_full_export.sh
+```
+
+If none of the candidates are present, volume tars SKIP for that run and the manifest records the reason — SQL dumps still proceed. Pull any tar-capable image locally (`docker pull alpine` etc.) and re-run only the volume artifacts:
+
+```bash
+ARTIFACTS=langfuse_clickhouse,langfuse_minio,ragflow_es,ragflow_minio,openwebui_data,n8n_storage \
+  ENV=banka_dev bash /tmp/k8s_full_export.sh
+```
 
 ---
 
