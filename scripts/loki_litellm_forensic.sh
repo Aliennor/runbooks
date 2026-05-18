@@ -1,37 +1,6 @@
 #!/bin/bash
-# LiteLLM proxy Loki forensic audit.
-#
-# Audits a LiteLLM proxy's stdout (as shipped to Loki by promtail) for
-# two patterns over a user-supplied time window:
-#   1. Admin-API mutations: POST/PUT/DELETE on
-#      /key|/user|/team|/model|/config|/customer|/organization
-#   2. Authorization-header / Bearer-token / sk- API-key leakage
-#
-# Solves two common Loki deployment gotchas:
-#   - Loki often only listens on its docker network (no host port
-#     binding), so a curl from the host shell cannot reach it. This
-#     script auto-discovers a container on Loki's network that has a
-#     working shell + wget/curl and runs all queries via docker exec.
-#   - Loki's default max_query_length is around 30 days. This script
-#     chunks the window into 28-day pieces and aggregates results.
-#
-# Probe order for the exec container: promtail, loki, grafana,
-# litellm. First one that has a shell and reaches http://loki:3100/ready
-# wins.
-#
-# Probe order for the LogQL container selector: container_name,
-# container, compose_service, compose_project, job, name, service_name.
-# First one returning >0 streams for the litellm container in the last
-# hour wins.
-#
-# Required env:
-#   LOKI_START   window start, RFC3339 (e.g. 2026-04-15T00:00:00Z)
-#   LOKI_END     window end,   RFC3339 (e.g. 2026-05-15T00:00:00Z)
-#
-# Optional env:
-#   LITELLM_CONTAINER  log-stream value to match (default: litellm)
-#
-# Output goes to stdout; tee it from the caller.
+# LiteLLM Loki forensic audit. Required env: LOKI_START, LOKI_END (RFC3339). Optional: LITELLM_CONTAINER (default litellm).
+# Example: LOKI_START='2026-04-15T00:00:00Z' LOKI_END='2026-05-15T00:00:00Z' bash loki_litellm_forensic.sh
 
 set +e
 umask 077
