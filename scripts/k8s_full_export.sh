@@ -204,8 +204,11 @@ find_one() {
   docker ps --format '{{.Names}}' | grep -E "$1" | head -1
 }
 
-ES_NAME="$(find_one '^(es01|docker-es01-1)$')"
-OS_NAME="$(find_one '^(opensearch01|docker-opensearch01-1)$')"
+# Container-name regexes tolerate both compose v1 (underscores: docker_mysql_1)
+# and compose v2 (hyphens: docker-mysql-1). Banka uses the underscore form.
+ES_NAME="$(find_one '^(es01|docker[-_]es01[-_]1)$')"
+OS_NAME="$(find_one '^(opensearch01|docker[-_]opensearch01[-_]1)$')"
+RAGFLOW_MYSQL_NAME="$(find_one '^docker[-_]mysql[-_]1$')"
 RAGFLOW_MINIO_NAME="$(docker ps --format '{{.Names}}' | grep -E 'minio' | grep -vE 'langfuse' | head -1)"
 LANGFUSE_CLICKHOUSE_NAME="$(find_one '^langfuse-clickhouse$')"
 LANGFUSE_MINIO_NAME="$(find_one '^langfuse-minio$')"
@@ -229,7 +232,7 @@ for id in $ALL_IDS; do enabled "$id" && sel_list="$sel_list $id"; done
 log "Selected artifacts:$sel_list"
 log "Discovered containers:"
 log "  shared_postgres            = $(find_one '^shared_postgres$')"
-log "  docker-mysql-1             = $(find_one '^docker-mysql-1$')"
+log "  ragflow mysql              = $RAGFLOW_MYSQL_NAME"
 log "  langfuse-clickhouse        = $LANGFUSE_CLICKHOUSE_NAME"
 log "  langfuse-minio             = $LANGFUSE_MINIO_NAME"
 log "  ragflow search ($RAGFLOW_SEARCH_KIND) = $RAGFLOW_SEARCH_NAME"
@@ -258,13 +261,13 @@ pg_dump_db() {
 
 mysql_dump_ragflow() {
   local out="$1"
-  if ! docker ps --format '{{.Names}}' | grep -q '^docker-mysql-1$'; then
-    log "[ragflow_mysql] SKIP — docker-mysql-1 not running"
-    record SKIP "$out" "docker-mysql-1 not running"
+  if [[ -z "$RAGFLOW_MYSQL_NAME" ]]; then
+    log "[ragflow_mysql] SKIP — no docker-mysql-1 / docker_mysql_1 container running"
+    record SKIP "$out" "no docker-mysql-1 / docker_mysql_1 container running"
     return
   fi
-  log "[ragflow_mysql] mysqldump rag_flow -> $out"
-  if docker exec docker-mysql-1 sh -c 'mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --add-drop-database --add-drop-table --routines --triggers --events --single-transaction --databases rag_flow' > "${OUT}/${out}" 2>>"$LOG"; then
+  log "[ragflow_mysql] mysqldump rag_flow -> $out (container=$RAGFLOW_MYSQL_NAME)"
+  if docker exec "$RAGFLOW_MYSQL_NAME" sh -c 'mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --add-drop-database --add-drop-table --routines --triggers --events --single-transaction --databases rag_flow' > "${OUT}/${out}" 2>>"$LOG"; then
     record OK "$out"
   else
     record FAIL "$out" "mysqldump exit $?"
