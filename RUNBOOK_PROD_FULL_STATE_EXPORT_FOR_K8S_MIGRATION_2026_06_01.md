@@ -70,9 +70,11 @@ If `-R` is blocked, the prod sshd has `AllowTcpForwarding no` — see the fallba
 
 ## Section C — Get the script on the prod host (offline transfer)
 
-Prod is assumed internet-isolated — do **not** try `curl`/`wget` from the prod host. The script ships via `scp` from the operator's repo machine (the same machine that has this runbook checked out).
+Prod is assumed internet-isolated — do **not** try `curl`/`wget` from the prod host. Two delivery paths, pick whichever fits the operator's situation:
 
-From the repo machine, in the runbook directory:
+### C.1 — Direct scp from the operator's repo machine (preferred)
+
+From the machine that has this runbook checked out, in the runbook directory:
 
 ```bash
 scp scripts/k8s_full_export.sh '<ssh_user>@<prod_host>:/tmp/k8s_full_export.sh'
@@ -86,7 +88,33 @@ chmod +x /tmp/k8s_full_export.sh && sha256sum /tmp/k8s_full_export.sh
 
 If the repo machine can't reach the prod host directly (jump-host topology), do a two-hop: `scp` to the jump host, then from the jump host `scp` to the prod host. Verify the sha256 at the final stop matches what `sha256sum scripts/k8s_full_export.sh` prints on the repo machine.
 
-If you re-pull or update the runbook later and need a fresh script on prod, repeat this section — never substitute a download from GitHub on the prod host.
+### C.2 — Workstation GUI authoring + MobaXterm SFTP upload
+
+Use this when the operator is working only from the Windows workstation (the same machine running the MobaXterm SSH session to prod) and the repo machine isn't reachable from there. The catch: Windows GUI editors (Notepad, Notepad++ default settings, VSCode's default Windows profile) save with `\r\n` line endings and may add a UTF-8 BOM, both of which break bash's shebang on Linux. We strip them on the prod side after upload.
+
+1. On the workstation, create `C:\exports\scripts\k8s_full_export.sh` and paste the script contents in. If the editor offers it, switch line endings to **LF** and encoding to **UTF-8 without BOM** before saving (Notepad++ → Edit → EOL Conversion → Unix (LF); Encoding → UTF-8 without BOM). If it doesn't, save anyway — the cleanup step below catches it.
+2. In the MobaXterm SSH tab that has `-R 2222:localhost:22` open against the prod host: drag `k8s_full_export.sh` from Windows Explorer **into the left-pane SFTP browser** at path `/tmp/` on the prod host. Wait for the transfer to finish.
+3. On the prod host, strip BOM + CRLF, make executable, and hash:
+
+```bash
+sed -i '1s/^\xEF\xBB\xBF//' /tmp/k8s_full_export.sh && sed -i 's/\r$//' /tmp/k8s_full_export.sh && chmod +x /tmp/k8s_full_export.sh && sha256sum /tmp/k8s_full_export.sh && wc -l /tmp/k8s_full_export.sh
+```
+
+`wc -l` should be ~420. The sha256 must match the operator's local `sha256sum scripts/k8s_full_export.sh` exactly — if it doesn't, the upload picked up extra characters (often a trailing newline or partial paste); re-author and re-upload.
+
+4. Sanity-check that bash can execute the file without side effects:
+
+```bash
+ARTIFACTS=list ENV=<env>_prod bash /tmp/k8s_full_export.sh
+```
+
+If you see "Available artifact IDs:" with the menu, you're good. If you get `bad interpreter: No such file or directory` or `unexpected end of file`, the BOM/CRLF strip didn't catch everything — confirm with:
+
+```bash
+head -1 /tmp/k8s_full_export.sh | od -c | head -2
+```
+
+The first line must read `# ! / u s r / b i n / e n v   b a s h \n` with no `\r` and no `\357 \273 \277` (BOM) bytes.
 
 ---
 
@@ -94,25 +122,90 @@ If you re-pull or update the runbook later and need a fresh script on prod, repe
 
 Inside the SSH session that has `-R 2222:localhost:22` open. `STREAM_DELETE=1` removes each artifact from the prod host immediately after a successful transfer, so `/tmp` never holds more than one large tar at a time.
 
+Before the first run, create one subfolder per env you'll export. From a MobaXterm local terminal tab:
+
 ```bash
-STREAM_TO='<win_user>@localhost:/drives/c/exports/prod/<env>' STREAM_PORT=2222 STREAM_DELETE=1 ENV=<env>_prod bash /tmp/k8s_full_export.sh
+mkdir -p /drives/c/exports/prod/<env>
 ```
 
-Create the target subdirectory on the workstation first (one per env you'll export):
+The default `ARTIFACTS=all` covers `litellm_pg n8n_pg ragflow_mysql ragflow_es ragflow_minio openwebui_data n8n_storage secrets`. `langfuse_pg`, `langfuse_clickhouse`, `langfuse_minio` are **not** in the default set. Each `scp` invocation is recorded in the export `.log`; the final manifest is streamed last and includes a `stream_to=...` line for traceability.
+
+### D.1 — Per-env worked sequence
+
+This is the end-to-end sequence for one prod host. Run it in full against the first env, gate on the manifest, then repeat against the next env (D.2).
+
+Assumptions before you start:
+
+- Section A done (MobaXterm sshd running on its port, loopback test passed).
+- Section B done (`ssh -R 2222:localhost:22 <ssh_user>@<prod_host>` open, prod-side scp preflight landed `_streamtest` on the workstation).
+- Section C done (`/tmp/k8s_full_export.sh` present, sha256 matches, `ARTIFACTS=list` dry-run printed the menu).
+- The workstation subfolder for this env exists (`mkdir -p /drives/c/exports/prod/<env>` above).
+
+Step 1 — pre-flight disk + container snapshot on the prod host:
+
+```bash
+df -h /tmp && docker system df && docker ps --format '{{.Names}}' | sort
+```
+
+Confirm `/tmp` has at least ~20 GB free (ClickHouse and ES tars are usually the biggest single artifacts) and that the expected service containers are running: `shared_postgres`, `docker-mysql-1` (or `docker_mysql_1`), `langfuse-clickhouse`, `langfuse-minio`, an ES/OpenSearch one, a RagFlow minio one, `openwebui`, `n8n`. Missing containers SKIP cleanly — they don't abort the run.
+
+Step 2 — start the export with streaming:
+
+```bash
+STREAM_TO='<win_user>@localhost:/drives/c/exports/prod/<env>' STREAM_PORT=2222 STREAM_DELETE=1 ENV=<env>_prod bash /tmp/k8s_full_export.sh 2>&1 | tee /tmp/<env>_prod_export_console.txt
+```
+
+Substitute `<win_user>` with the workstation username that worked in the Section A loopback test, and `<env>` with the env identifier (the part of `<env>_prod` before `_prod`). The `tee` mirrors stdout/stderr into a console log on the prod host so a dropped SSH session doesn't lose the trail.
+
+What you'll see, in order (wall-clock anywhere from minutes to ~1 h depending on ClickHouse/ES volume):
+
+1. `[HH:MM:SS] ENV=<env>_prod STAMP=... OUT=/tmp/k8s_export_<env>_prod_<stamp>`
+2. Discovered-containers list (sanity-check this matches Step 1's `docker ps`).
+3. `tar image: alpine ...` — a local image with `tar` was found.
+4. SQL dump lines, each followed by `[stream] scp ... -> <win_user>@localhost:/drives/c/exports/prod/<env> (port=2222)` and `[stream] OK ...`. Then `[stream] removed local copy ...`.
+5. Volume-tar phase: each container gets `docker stop`, then heartbeat lines `still tarring (Ns elapsed, size=...)`, then `docker start`, then the scp+delete pair.
+6. `[secrets] scanning ...` → `[stream] OK <env>_prod_secrets_<stamp>.tar.gz` → delete.
+7. `[manifest] building ...` and the final EXPORT SUMMARY block; manifest + log streamed last.
+
+Step 3 — confirm completion from the prod side:
+
+```bash
+ls -1 /tmp/k8s_export_<env>_prod_*/ | head -20 ; echo --- ; du -sh /tmp/k8s_export_<env>_prod_*
+```
+
+With `STREAM_DELETE=1` the directory should be empty (or only contain the manifest+log if their final stream failed). Total size near zero.
+
+Step 4 — confirm on the workstation:
 
 ```powershell
-New-Item -ItemType Directory -Force -Path C:\exports\prod\<env>
+Get-ChildItem C:\exports\prod\<env> -Filter '<env>_prod_*' | Sort-Object Name
 ```
 
-Each `scp` invocation is recorded in the export `.log`; the final manifest is streamed last and includes a `stream_to=...` line for traceability.
+You should see eight tar.gz / sql files plus `<env>_prod_manifest_<stamp>.txt` and `<env>_prod_export_<stamp>.log`. The manifest is the source of truth — open it and check the artifacts table at the bottom. Any `FAIL` or `SKIP` rows need attention before you move to the next env.
 
-### Including Langfuse on a specific host
+Step 5 — sha256 cross-check on the workstation (MobaXterm local terminal or Git Bash):
+
+```bash
+(cd /c/exports/prod/<env> && grep -E '^[0-9a-f]{64}' *_manifest_*.txt | sha256sum -c 2>&1 | tail -20)
+```
+
+Every artifact should print `: OK`. A mismatch means in-flight corruption — re-run just that artifact via D.3 below.
+
+Step 6 — pause and verify before starting the next env.
+
+### D.2 — Additional envs
+
+Repeat Sections B and D.1 for each remaining env. The only things that change per env are the host you `ssh -R 2222:localhost:22` to and the `<env>` substitution everywhere it appears. The workstation-side MobaXterm sshd setup (Section A) is one-time and stays valid across all envs.
+
+### D.3 — Including Langfuse on a specific host
+
+`langfuse_pg`, `langfuse_clickhouse`, `langfuse_minio` are excluded from the default `ARTIFACTS=all`. To include them on a given env:
 
 ```bash
 STREAM_TO='<win_user>@localhost:/drives/c/exports/prod/<env>' STREAM_PORT=2222 STREAM_DELETE=1 ARTIFACTS=all_with_langfuse ENV=<env>_prod bash /tmp/k8s_full_export.sh
 ```
 
-### Retrying after a partial failure
+### D.4 — Retrying after a partial failure
 
 `STREAM_DELETE=1` only fires after a successful scp, so a failed transfer leaves the artifact intact on the prod host under `/tmp/k8s_export_<env>_prod_<stamp>/`. Re-run with just the failed ID(s):
 
@@ -126,9 +219,9 @@ STREAM_TO='<win_user>@localhost:/drives/c/exports/prod/<env>' STREAM_PORT=2222 S
 scp -P 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null /tmp/k8s_export_<env>_prod_<stamp>/<env>_prod_<artifact>_<stamp>.* <win_user>@localhost:/drives/c/exports/prod/<env>/
 ```
 
-### Fallback: no workstation sshd, or `AllowTcpForwarding no`
+### D.5 — Fallback: no workstation sshd, or `AllowTcpForwarding no`
 
-Drop the `STREAM_*` env vars; the script behaves exactly as in the dev runbook (writes to `/tmp/k8s_export_<env>_prod_<stamp>/`, you scp the directory afterward per Section C of the dev runbook, just with `_prod` in the env identifier).
+Drop the `STREAM_*` env vars; the script behaves exactly as in the dev runbook (writes to `/tmp/k8s_export_<env>_prod_<stamp>/`, you scp the directory afterward per Section C of the dev runbook, just with `_prod` in the env identifier). With MobaXterm you can also skip scp entirely: the left-pane SFTP browser follows your remote `cd`, so navigate into the staging directory and drag it onto Windows Explorer.
 
 ---
 
