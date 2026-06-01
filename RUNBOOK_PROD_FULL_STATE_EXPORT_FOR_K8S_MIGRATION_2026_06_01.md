@@ -11,6 +11,8 @@ Script: [`scripts/k8s_full_export.sh`](scripts/k8s_full_export.sh)
 
 `ENV=` takes the same env identifiers documented in the dev runbook, with `_prod` in place of `_dev`. Substitute `<env>` and `<prod_host>` placeholders below for your environment.
 
+**Assumption:** prod hosts are internet-isolated (no GitHub / public-package access). The script is delivered via `scp` from the operator's repo machine — never `curl`-from-GitHub on the prod host. Same for any patched re-runs.
+
 ---
 
 ## Section A — One-time workstation-side setup (MobaXterm embedded sshd)
@@ -66,19 +68,25 @@ If `-R` is blocked, the prod sshd has `AllowTcpForwarding no` — see the fallba
 
 ---
 
-## Section C — Get the script on the prod host
+## Section C — Get the script on the prod host (offline transfer)
 
-From wherever you keep this runbook's repo, push the script in:
+Prod is assumed internet-isolated — do **not** try `curl`/`wget` from the prod host. The script ships via `scp` from the operator's repo machine (the same machine that has this runbook checked out).
+
+From the repo machine, in the runbook directory:
 
 ```bash
 scp scripts/k8s_full_export.sh '<ssh_user>@<prod_host>:/tmp/k8s_full_export.sh'
 ```
 
-Verify on the host:
+Then on the prod host, make it executable and record its hash:
 
 ```bash
-sha256sum /tmp/k8s_full_export.sh
+chmod +x /tmp/k8s_full_export.sh && sha256sum /tmp/k8s_full_export.sh
 ```
+
+If the repo machine can't reach the prod host directly (jump-host topology), do a two-hop: `scp` to the jump host, then from the jump host `scp` to the prod host. Verify the sha256 at the final stop matches what `sha256sum scripts/k8s_full_export.sh` prints on the repo machine.
+
+If you re-pull or update the runbook later and need a fresh script on prod, repeat this section — never substitute a download from GitHub on the prod host.
 
 ---
 
