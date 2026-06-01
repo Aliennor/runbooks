@@ -6,19 +6,33 @@ Root cause: the Grafana container inherits the host's corporate HTTP proxy via e
 
 Fix: add `NO_PROXY` to the Grafana service environment so container-to-container traffic bypasses the proxy.
 
-Image: `docker.io/aliennor/banka-dev108-grafana-no-proxy:2026-06-01-r1`
+Image: `docker.io/aliennor/banka-dev108-grafana-no-proxy:2026-06-01-r2` (encrypted)
 
 ---
 
-## Extract patched compose file
+## Set key
 
 ```
-docker pull docker.io/aliennor/banka-dev108-grafana-no-proxy:2026-06-01-r1
+PATCH_KEY=<your-patch-key>
+```
+
+---
+
+## Pull and decrypt compose file
+
+```
+docker pull docker.io/aliennor/banka-dev108-grafana-no-proxy:2026-06-01-r2
 ```
 
 ```
-docker run --rm docker.io/aliennor/banka-dev108-grafana-no-proxy:2026-06-01-r1 cat /patch/observability/docker-compose.yml > /tmp/grafana-compose-patch.yml
+docker run --rm docker.io/aliennor/banka-dev108-grafana-no-proxy:2026-06-01-r2 cat /patch/observability/docker-compose.yml.enc | openssl enc -aes-256-cbc -pbkdf2 -d -k "$PATCH_KEY" > /tmp/grafana-compose-patch.yml
 ```
+
+```
+head -3 /tmp/grafana-compose-patch.yml
+```
+
+Expected first line: `version: '3.8'`. If you see binary garbage the key is wrong.
 
 ---
 
