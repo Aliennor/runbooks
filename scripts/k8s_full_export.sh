@@ -63,13 +63,19 @@ if [[ -z "$ENV" ]]; then
   exit 2
 fi
 case "$ENV" in
-  banka_dev|katilim_dev|zt_arf_dev) : ;;
-  *) echo "ERROR: ENV must be one of: banka_dev katilim_dev zt_arf_dev (got: $ENV)" >&2; exit 2 ;;
+  banka_dev|katilim_dev|zt_arf_dev|banka_prod|katilim_prod|zt_arf_prod) : ;;
+  *) echo "ERROR: ENV must be one of: banka_dev katilim_dev zt_arf_dev banka_prod katilim_prod zt_arf_prod (got: $ENV)" >&2; exit 2 ;;
 esac
 
 # ---------------------------------------------------------------------------
 # Artifact selection
+#
+# ARTIFACTS=all (default)   -> DEFAULT_IDS  (langfuse_* EXCLUDED)
+# ARTIFACTS=all_with_langfuse -> every id
+# ARTIFACTS=<comma list>    -> exactly those ids (langfuse_* allowed if named)
 # ---------------------------------------------------------------------------
+LANGFUSE_IDS="langfuse_pg langfuse_clickhouse langfuse_minio"
+DEFAULT_IDS="litellm_pg n8n_pg ragflow_mysql ragflow_es ragflow_minio openwebui_data n8n_storage secrets"
 ALL_IDS="litellm_pg langfuse_pg n8n_pg ragflow_mysql langfuse_clickhouse langfuse_minio ragflow_es ragflow_minio openwebui_data n8n_storage secrets"
 
 ARTIFACTS="${ARTIFACTS:-all}"
@@ -87,19 +93,43 @@ TAR_IMAGE_CANDIDATES="${TAR_IMAGE_CANDIDATES:-alpine alpine:3.20 alpine:3.19 alp
 # Heartbeat interval (seconds) for in-progress vol_tar runs.
 HEARTBEAT="${HEARTBEAT:-15}"
 
+# ---------------------------------------------------------------------------
+# Streaming (optional): push each OK artifact to a remote target as soon as
+# it's produced. Useful when /tmp is tight on the source host, and to bring
+# files directly to your workstation without an intermediate hop.
+#
+#   STREAM_TO=user@host:/path     (scp destination; required to enable)
+#   STREAM_PORT=22                (scp port; use the reverse-tunneled port if
+#                                  you opened `ssh -R 2222:localhost:22 ...`)
+#   STREAM_DELETE=0|1             (1 = rm artifact from source after good scp)
+#   STREAM_SSH_OPTS="-o ..."      (extra ssh options for scp)
+# ---------------------------------------------------------------------------
+STREAM_TO="${STREAM_TO:-}"
+STREAM_PORT="${STREAM_PORT:-22}"
+STREAM_DELETE="${STREAM_DELETE:-0}"
+STREAM_SSH_OPTS="${STREAM_SSH_OPTS:--o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=10}"
+
 if [[ "$ARTIFACTS" == "list" ]]; then
   echo "Available artifact IDs:"
-  for id in $ALL_IDS; do echo "  $id"; done
+  for id in $ALL_IDS; do
+    case " $LANGFUSE_IDS " in
+      *" $id "*) echo "  $id   (langfuse — EXCLUDED from default 'all')" ;;
+      *)         echo "  $id" ;;
+    esac
+  done
   echo
+  echo "Default 'all':    bash $0 $ENV                 (langfuse_* excluded)"
+  echo "Include langfuse: ARTIFACTS=all_with_langfuse bash $0 $ENV"
   echo "Pick a subset:    ARTIFACTS=litellm_pg,n8n_pg bash $0 $ENV"
   echo "Exclude some:     SKIP=ragflow_es,ragflow_minio bash $0 $ENV"
-  echo "Everything:       bash $0 $ENV     (default)"
   exit 0
 fi
 
 # Build the SELECTED set as a space-padded string for portability (bash 3.2+).
 SELECTED=""
 if [[ "$ARTIFACTS" == "all" ]]; then
+  SELECTED=" $DEFAULT_IDS "
+elif [[ "$ARTIFACTS" == "all_with_langfuse" ]]; then
   SELECTED=" $ALL_IDS "
 else
   IFS=',' read -ra picks <<<"$ARTIFACTS"
@@ -154,12 +184,36 @@ log() { printf '[%s] %s\n' "$(ts)" "$*" | tee -a "$LOG" >&2; }
 OK_COUNT=0; SKIP_COUNT=0; FAIL_COUNT=0
 declare -a STATUS_ROWS=()
 
+maybe_stream() {
+  # maybe_stream <basename-under-OUT>
+  local file="$1"
+  [[ -z "$STREAM_TO" ]] && return 0
+  [[ ! -f "${OUT}/${file}" ]] && return 0
+  log "[stream] scp ${file} -> ${STREAM_TO} (port=${STREAM_PORT})"
+  # shellcheck disable=SC2086
+  if scp -P "$STREAM_PORT" $STREAM_SSH_OPTS "${OUT}/${file}" "${STREAM_TO}/" >>"$LOG" 2>&1; then
+    log "[stream] OK ${file}"
+    if [[ "$STREAM_DELETE" == "1" ]]; then
+      rm -f "${OUT}/${file}" && log "[stream] removed local copy ${file}"
+    fi
+    return 0
+  else
+    log "[stream] FAIL ${file} (rc=$?) — artifact retained at ${OUT}/${file}"
+    return 1
+  fi
+}
+
 record() {
   # record <status> <artifact> <note>
   local status="$1" artifact="$2" note="${3:-}"
-  STATUS_ROWS+=("${status}|${artifact}|${note}")
+  local sha="" sz=""
+  if [[ "$status" == "OK" && -f "${OUT}/${artifact}" ]]; then
+    sha="$(sha256sum "${OUT}/${artifact}" 2>/dev/null | awk '{print $1}')"
+    sz="$(du -h "${OUT}/${artifact}" 2>/dev/null | awk '{print $1}')"
+  fi
+  STATUS_ROWS+=("${status}|${artifact}|${note}|${sha}|${sz}")
   case "$status" in
-    OK)   OK_COUNT=$((OK_COUNT+1))   ;;
+    OK)   OK_COUNT=$((OK_COUNT+1));   maybe_stream "$artifact" || true ;;
     SKIP) SKIP_COUNT=$((SKIP_COUNT+1)) ;;
     FAIL) FAIL_COUNT=$((FAIL_COUNT+1)) ;;
   esac
@@ -375,25 +429,35 @@ log "[manifest] building $MAN"
 {
   printf 'env=%s\nstamp=%s\nhost=%s\nexport_ts=%s\n' "$ENV" "$STAMP" "$(hostname)" "$(date -Iseconds)"
   printf 'ragflow_search_kind=%s\n' "$RAGFLOW_SEARCH_KIND"
+  if [[ -n "$STREAM_TO" ]]; then
+    printf 'stream_to=%s\nstream_port=%s\nstream_delete=%s\n' "$STREAM_TO" "$STREAM_PORT" "$STREAM_DELETE"
+  fi
   printf '\n--- container -> image ---\n'
   docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | sort
   printf '\n--- artifacts ---\n'
   printf '%-6s  %-12s  %s\n' STATUS SIZE FILE
   for row in "${STATUS_ROWS[@]}"; do
-    status="${row%%|*}"; rest="${row#*|}"
-    artifact="${rest%%|*}"; note="${rest#*|}"
-    if [[ "$status" == "OK" && -f "${OUT}/${artifact}" ]]; then
-      sz=$(du -h "${OUT}/${artifact}" 2>/dev/null | awk '{print $1}')
-      printf '%-6s  %-12s  %s\n' "$status" "$sz" "$artifact"
+    IFS='|' read -r status artifact note sha sz <<<"$row"
+    if [[ "$status" == "OK" ]]; then
+      printf '%-6s  %-12s  %s\n' "$status" "${sz:--}" "$artifact"
     else
       printf '%-6s  %-12s  %s   %s\n' "$status" "-" "$artifact" "${note:+($note)}"
     fi
   done
   printf '\n--- sha256 (OK artifacts only) ---\n'
-  (cd "$OUT" && sha256sum "${ENV}"_*_"${STAMP}".* 2>/dev/null | grep -vE "manifest|export_${STAMP}\.log") || true
+  for row in "${STATUS_ROWS[@]}"; do
+    IFS='|' read -r status artifact note sha sz <<<"$row"
+    [[ "$status" == "OK" && -n "$sha" ]] && printf '%s  %s\n' "$sha" "$artifact"
+  done
   printf '\n--- totals ---\n'
   printf 'ok=%d skip=%d fail=%d total_size=%s\n' "$OK_COUNT" "$SKIP_COUNT" "$FAIL_COUNT" "$(du -sh "$OUT" | awk '{print $1}')"
 } > "$MAN"
+
+# Stream manifest + log at the end (always, if streaming enabled)
+if [[ -n "$STREAM_TO" ]]; then
+  maybe_stream "$(basename "$MAN")" || true
+  maybe_stream "$(basename "$LOG")" || true
+fi
 
 # ---------------------------------------------------------------------------
 # Summary to stdout

@@ -53,6 +53,12 @@ ragflow_es            ragflow_minio          openwebui_data
 n8n_storage           secrets
 ```
 
+`ARTIFACTS=all` (the default) **excludes the langfuse_* trio** (`langfuse_pg`, `langfuse_clickhouse`, `langfuse_minio`). To include them either name them explicitly (`ARTIFACTS=langfuse_pg,langfuse_clickhouse,langfuse_minio,...`) or use `ARTIFACTS=all_with_langfuse`.
+
+### Streaming artifacts straight to your workstation
+
+Set `STREAM_TO=<user>@<host>:/<path>` and each OK artifact is `scp`-pushed as soon as it's produced. Combine with `STREAM_DELETE=1` to free `/tmp` on the source. Use `STREAM_PORT=<n>` when scp'ing through a reverse-forwarded port. Manifest + log are streamed at the end of the run. See the prod runbook (internal repo) for the Windows-side OpenSSH-Server / reverse-port-forward recipe.
+
 Print the menu on a host without running anything:
 
 ```bash
