@@ -107,7 +107,7 @@ HEARTBEAT="${HEARTBEAT:-15}"
 STREAM_TO="${STREAM_TO:-}"
 STREAM_PORT="${STREAM_PORT:-22}"
 STREAM_DELETE="${STREAM_DELETE:-0}"
-STREAM_SSH_OPTS="${STREAM_SSH_OPTS:--o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=10}"
+STREAM_SSH_OPTS="${STREAM_SSH_OPTS:--o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=10}"
 
 if [[ "$ARTIFACTS" == "list" ]]; then
   echo "Available artifact IDs:"
@@ -183,6 +183,32 @@ log() { printf '[%s] %s\n' "$(ts)" "$*" | tee -a "$LOG" >&2; }
 
 OK_COUNT=0; SKIP_COUNT=0; FAIL_COUNT=0
 declare -a STATUS_ROWS=()
+
+# Containers the script has stopped but not yet restarted. The cleanup trap
+# starts everything in this list on any exit path (normal, error, SIGINT,
+# SIGTERM) so a Ctrl+C between docker-stop and docker-start can never leave
+# a service offline.
+declare -a STOPPED_CONTAINERS=()
+
+cleanup_restart_containers() {
+  local rc=$?
+  local c
+  if [[ ${#STOPPED_CONTAINERS[@]} -gt 0 ]]; then
+    log "[cleanup] restarting ${#STOPPED_CONTAINERS[@]} container(s) the script stopped: ${STOPPED_CONTAINERS[*]}"
+    for c in "${STOPPED_CONTAINERS[@]}"; do
+      if docker start "$c" >>"$LOG" 2>&1; then
+        log "[cleanup] docker start $c OK"
+      else
+        log "[cleanup] WARN: docker start $c failed — verify manually with: docker ps -a"
+      fi
+    done
+    STOPPED_CONTAINERS=()
+  fi
+  return $rc
+}
+trap cleanup_restart_containers EXIT
+trap 'log "[trap] caught SIGINT — restarting any stopped containers before exit"; exit 130' INT
+trap 'log "[trap] caught SIGTERM — restarting any stopped containers before exit"; exit 143' TERM
 
 maybe_stream() {
   # maybe_stream <basename-under-OUT>
@@ -350,7 +376,12 @@ vol_tar() {
   was_running="$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null || echo false)"
   log "[$label] tar $container:$mount -> $out (was_running=$was_running, image=$TAR_IMAGE)"
   if [[ "$was_running" == "true" ]]; then
-    docker stop "$container" >>"$LOG" 2>&1 || { record FAIL "$out" "docker stop failed"; return; }
+    if docker stop "$container" >>"$LOG" 2>&1; then
+      STOPPED_CONTAINERS+=("$container")
+    else
+      record FAIL "$out" "docker stop failed"
+      return
+    fi
   fi
   ( docker run --rm --volumes-from "$container" -v "${OUT}:/out" "$TAR_IMAGE" tar czf "/out/${out}" -C "$mount" . >>"$LOG" 2>&1 ) &
   local tar_pid=$!
@@ -366,13 +397,27 @@ vol_tar() {
       log "[$label] still tarring (${elapsed}s elapsed, no output file yet)"
     fi
   done
-  if wait "$tar_pid"; then
+  local tar_rc=0
+  wait "$tar_pid" || tar_rc=$?
+  # Restart the container BEFORE record_OK, so a hung scp inside record's
+  # maybe_stream() can't extend the service downtime past the tar duration.
+  if [[ "$was_running" == "true" ]]; then
+    if docker start "$container" >>"$LOG" 2>&1; then
+      # Drop from the cleanup list — successfully back up.
+      local i
+      local new_list=()
+      for i in "${STOPPED_CONTAINERS[@]}"; do
+        [[ "$i" != "$container" ]] && new_list+=("$i")
+      done
+      STOPPED_CONTAINERS=(${new_list[@]+"${new_list[@]}"})
+    else
+      log "[$label] WARN: docker start $container failed — left in STOPPED_CONTAINERS for cleanup trap"
+    fi
+  fi
+  if [[ "$tar_rc" -eq 0 ]]; then
     record OK "$out"
   else
-    record FAIL "$out" "tar via volumes-from failed"
-  fi
-  if [[ "$was_running" == "true" ]]; then
-    docker start "$container" >>"$LOG" 2>&1 || log "[$label] WARN: docker start $container failed"
+    record FAIL "$out" "tar via volumes-from failed (rc=$tar_rc)"
   fi
 }
 
