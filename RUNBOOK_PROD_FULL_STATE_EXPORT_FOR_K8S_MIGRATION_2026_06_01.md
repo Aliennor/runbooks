@@ -25,7 +25,7 @@ In MobaXterm:
 MobaXterm exposes Windows drives under `/drives/c/...`, not `/c/...` like Microsoft's OpenSSH. Confirm and create the target directory by SSH-ing to your own machine from a local terminal tab:
 
 ```bash
-ssh -p 22 -o StrictHostKeyChecking=accept-new <win_user>@localhost 'mkdir -p /drives/c/exports/prod && ls -ld /drives/c/exports/prod'
+ssh -p 22 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null <win_user>@localhost 'mkdir -p /drives/c/exports/prod && ls -ld /drives/c/exports/prod'
 ```
 
 If that prints the directory, your local sshd is good. (If MobaXterm uses a non-22 port, substitute it everywhere below.)
@@ -51,7 +51,7 @@ ss -tlnp 2>/dev/null | grep 2222 || netstat -tlnp 2>/dev/null | grep 2222
 Pre-flight scp test — creates a 1-byte file on the workstation (MobaXterm path style):
 
 ```bash
-echo ping > /tmp/_streamtest && scp -P 2222 -o StrictHostKeyChecking=accept-new /tmp/_streamtest <win_user>@localhost:/drives/c/exports/prod/ && rm /tmp/_streamtest
+echo ping > /tmp/_streamtest && scp -P 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null /tmp/_streamtest <win_user>@localhost:/drives/c/exports/prod/ && rm /tmp/_streamtest
 ```
 
 If the file appears on the workstation under `C:\exports\prod\_streamtest`, streaming is good to go. (If you're on Microsoft OpenSSH instead of MobaXterm, swap `/drives/c/...` → `/c/...`.)
@@ -115,7 +115,7 @@ STREAM_TO='<win_user>@localhost:/drives/c/exports/prod/<env>' STREAM_PORT=2222 S
 …or scp the residuals manually from another shell on the prod host:
 
 ```bash
-scp -P 2222 -o StrictHostKeyChecking=accept-new /tmp/k8s_export_<env>_prod_<stamp>/<env>_prod_<artifact>_<stamp>.* <win_user>@localhost:/drives/c/exports/prod/<env>/
+scp -P 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null /tmp/k8s_export_<env>_prod_<stamp>/<env>_prod_<artifact>_<stamp>.* <win_user>@localhost:/drives/c/exports/prod/<env>/
 ```
 
 ### Fallback: no workstation sshd, or `AllowTcpForwarding no`
