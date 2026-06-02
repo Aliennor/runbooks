@@ -173,7 +173,7 @@ STREAM_TO='<win_user>@localhost:/drives/c/exports/prod/<env>' STREAM_PORT=2222 S
 
 ### D.5 — No-streaming variant (limited SSH tool, no reverse tunnel, or `AllowTcpForwarding no`)
 
-Skip Section A and B.2/B.3. Get the script onto prod via C.1 from the repo machine (or any host that can reach prod). Then on prod:
+Skip Sections A and B.2/B.3. Script delivery: C.2 (Windows GUI authoring + the SSH tool's SFTP / file-transfer feature to push to `/tmp/`). Then on prod:
 
 Disk headroom — must hold ALL artifacts at once (no `STREAM_DELETE`):
 
@@ -187,7 +187,7 @@ Full run:
 ENV=<env>_prod bash /tmp/k8s_full_export.sh 2>&1 | tee /tmp/<env>_prod_export_console.txt
 ```
 
-Subset batching when `/tmp` is tight — run small artifacts first, pull, delete, then run volume tars individually:
+Subset batching when `/tmp` is tight — run small artifacts first, transfer to workstation, delete, then run volume tars individually:
 
 ```bash
 ARTIFACTS=litellm_pg,n8n_pg,ragflow_mysql,secrets ENV=<env>_prod bash /tmp/k8s_full_export.sh
@@ -197,13 +197,7 @@ ARTIFACTS=litellm_pg,n8n_pg,ragflow_mysql,secrets ENV=<env>_prod bash /tmp/k8s_f
 ARTIFACTS=openwebui_data ENV=<env>_prod bash /tmp/k8s_full_export.sh
 ```
 
-Pull staging directory off prod (run from the repo machine or any host with reach):
-
-```bash
-scp -r '<ssh_user>@<prod_host>:/tmp/k8s_export_<env>_prod_*' ~/k8s_migration_exports/<env>/
-```
-
-Delete staging on prod after pull verified:
+Pull staging directory off prod via the SSH tool's SFTP / file-download feature (target `/tmp/k8s_export_<env>_prod_<stamp>/` on prod → workstation directory). After verifying on the workstation, delete prod staging:
 
 ```bash
 rm -rf /tmp/k8s_export_<env>_prod_*
