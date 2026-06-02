@@ -171,9 +171,43 @@ STREAM_TO='<win_user>@localhost:/drives/c/exports/prod/<env>' STREAM_PORT=2222 S
 STREAM_TO='<win_user>@localhost:/drives/c/exports/prod/<env>' STREAM_PORT=2222 STREAM_DELETE=1 ARTIFACTS=<failed_id1>,<failed_id2> ENV=<env>_prod bash /tmp/k8s_full_export.sh
 ```
 
-### D.5 — Fallback: no workstation sshd, or `AllowTcpForwarding no`
+### D.5 — No-streaming variant (limited SSH tool, no reverse tunnel, or `AllowTcpForwarding no`)
 
-Drop the `STREAM_*` env vars; the script behaves exactly as in the dev runbook (writes to `/tmp/k8s_export_<env>_prod_<stamp>/`, you scp the directory afterward per Section C of the dev runbook, just with `_prod` in the env identifier). With MobaXterm you can also skip scp entirely: the left-pane SFTP browser follows your remote `cd`, so navigate into the staging directory and drag it onto Windows Explorer.
+Skip Section A and B.2/B.3. Get the script onto prod via C.1 from the repo machine (or any host that can reach prod). Then on prod:
+
+Disk headroom — must hold ALL artifacts at once (no `STREAM_DELETE`):
+
+```bash
+df -h /tmp && docker system df && docker ps --format '{{.Names}}' | sort
+```
+
+Full run:
+
+```bash
+ENV=<env>_prod bash /tmp/k8s_full_export.sh 2>&1 | tee /tmp/<env>_prod_export_console.txt
+```
+
+Subset batching when `/tmp` is tight — run small artifacts first, pull, delete, then run volume tars individually:
+
+```bash
+ARTIFACTS=litellm_pg,n8n_pg,ragflow_mysql,secrets ENV=<env>_prod bash /tmp/k8s_full_export.sh
+```
+
+```bash
+ARTIFACTS=openwebui_data ENV=<env>_prod bash /tmp/k8s_full_export.sh
+```
+
+Pull staging directory off prod (run from the repo machine or any host with reach):
+
+```bash
+scp -r '<ssh_user>@<prod_host>:/tmp/k8s_export_<env>_prod_*' ~/k8s_migration_exports/<env>/
+```
+
+Delete staging on prod after pull verified:
+
+```bash
+rm -rf /tmp/k8s_export_<env>_prod_*
+```
 
 ### D.6 — Salvaging artifacts from a partially-streamed run (artifact exists, scp failed)
 
